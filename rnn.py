@@ -20,25 +20,43 @@ class RNN(nn.Module):
     def __init__(self, input_dim, h):  # Add relevant parameters
         super(RNN, self).__init__()
         self.h = h
-        self.numOfLayer = 1
-        self.rnn = nn.RNN(input_dim, h, self.numOfLayer, nonlinearity='tanh')
-        self.W = nn.Linear(h, 5)
+        self.numOfLayer = 2
+        self.rnn = nn.LSTM(input_dim, h, self.numOfLayer, batch_first=False)
+        self.W = nn.Linear(h, 5)  # 5 output classes for star ratings (0-4)
         self.softmax = nn.LogSoftmax(dim=1)
         self.loss = nn.NLLLoss()
+        self.dropout = nn.Dropout(0.3)
 
     def compute_Loss(self, predicted_vector, gold_label):
         return self.loss(predicted_vector, gold_label)
 
     def forward(self, inputs):
+        '''
         # [to fill] obtain hidden layer representation (https://pytorch.org/docs/stable/generated/torch.nn.RNN.html)
         _, hidden = self.rnn(inputs)
+        
         # [to fill] obtain output layer representations
-        output = self.W(hidden[-1])
+        hidden = self.dropout(hidden[-1])
+        output = self.W(hidden)
         # [to fill] sum over output 
 
         # [to fill] obtain probability dist.
         predicted_vector = self.softmax(output)
+        '''
+        _, (hidden_state, _) = self.rnn(inputs)
+    
+        # Get the final hidden state from the last layer
+        final_hidden = hidden_state[-1]  # shape: [batch_size, hidden_size]
         
+        # Apply dropout
+        final_hidden = self.dropout(final_hidden)
+        
+        # Apply linear layer
+        output = self.W(final_hidden)
+        
+        # Apply softmax
+        predicted_vector = self.softmax(output)
+    
         return predicted_vector
 
 
@@ -86,7 +104,7 @@ if __name__ == "__main__":
     print("========== Vectorizing data ==========")
     model = RNN(50, args.hidden_dim)  # Fill in parameters
     # optimizer = optim.SGD(model.parameters(), lr=0.01, momentum=0.9)
-    optimizer = optim.Adam(model.parameters(), lr=0.01)
+    optimizer = optim.Adam(model.parameters(), lr=0.005)
     word_embedding = pickle.load(open('./word_embedding.pkl', 'rb'))
 
     stopping_condition = False
@@ -98,9 +116,7 @@ if __name__ == "__main__":
     while not stopping_condition:
         random.shuffle(train_data)
         model.train()
-        # You will need further code to operationalize training, ffnn.py may be helpful
         print("Training started for epoch {}".format(epoch + 1))
-        train_data = train_data
         correct = 0
         total = 0
         minibatch_size = 16
@@ -110,46 +126,80 @@ if __name__ == "__main__":
         loss_count = 0
         for minibatch_index in tqdm(range(N // minibatch_size)):
             optimizer.zero_grad()
-            loss = None
+            
+            # Collect all examples in a minibatch
+            batch_inputs = []
+            batch_lengths = []
+            batch_labels = []
+            
+            # Process each example in the minibatch
             for example_index in range(minibatch_size):
-                input_words, gold_label = train_data[minibatch_index * minibatch_size + example_index]
+                idx = minibatch_index * minibatch_size + example_index
+                input_words, gold_label = train_data[idx]
                 input_words = " ".join(input_words)
-
+                
                 # Remove punctuation
                 input_words = input_words.translate(input_words.maketrans("", "", string.punctuation)).split()
-
+                
                 # Look up word embedding dictionary
-                vectors = [word_embedding[i.lower()] if i.lower() in word_embedding.keys() else word_embedding['unk'] for i in input_words ]
-
-                # Transform the input into required shape
-                vectors = np.array(vectors)  # Convert list of arrays to a single numpy array
-                vectors = torch.tensor(vectors).view(len(vectors), 1, -1)
-                output = model(vectors)
-
-                # Get loss
-                example_loss = model.compute_Loss(output.view(1,-1), torch.tensor([gold_label]))
-
-                # Get predicted label
-                predicted_label = torch.argmax(output)
-
-                correct += int(predicted_label == gold_label)
-                # print(predicted_label, gold_label)
-                total += 1
-                if loss is None:
-                    loss = example_loss
+                vectors = [word_embedding[i.lower()] if i.lower() in word_embedding.keys() else word_embedding['unk'] for i in input_words]
+                
+                # Keep track of original sequence length
+                batch_lengths.append(len(vectors))
+                
+                # Add to batch inputs
+                batch_inputs.append(np.array(vectors))
+                batch_labels.append(gold_label)
+            
+            # Find the max sequence length in this batch
+            max_length = max(batch_lengths)
+            
+            # Pad sequences to max_length
+            padded_inputs = []
+            for i, seq in enumerate(batch_inputs):
+                if len(seq) < max_length:
+                    # Pad with zeros
+                    padding = np.zeros((max_length - len(seq), word_embedding['unk'].shape[0]))
+                    padded_seq = np.vstack((seq, padding))
                 else:
-                    loss += example_loss
-
-            loss = loss / minibatch_size
-            loss_total += loss.data
-            loss_count += 1
+                    padded_seq = seq
+                padded_inputs.append(padded_seq)
+            
+            # Stack all sequences into a single array - shape: [max_length, batch_size, features]
+            batch_tensor = np.stack([p for p in padded_inputs], axis=1)
+            
+            # Convert to tensor
+            batch_tensor = torch.tensor(batch_tensor, dtype=torch.float32)
+            batch_labels = torch.tensor(batch_labels, dtype=torch.long)
+            
+            # Forward pass
+            output = model(batch_tensor)
+            
+            # Compute loss
+            loss = model.compute_Loss(output, batch_labels)
+            
+            # Backpropagation
             loss.backward()
+            
+            # Optional: gradient clipping to prevent exploding gradients
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            
+            # Update weights
             optimizer.step()
-        print(loss_total/loss_count)
+            
+            # Calculate accuracy
+            _, predicted = torch.max(output, 1)
+            correct += (predicted == batch_labels).sum().item()
+            total += batch_labels.size(0)
+            
+            loss_total += loss.item()
+            loss_count += 1
+        
+        # Print epoch statistics    
+        print(f"Average loss: {loss_total/loss_count:.4f}")
         print("Training completed for epoch {}".format(epoch + 1))
         print("Training accuracy for epoch {}: {}".format(epoch + 1, correct / total))
-        trainning_accuracy = correct/total
-
+        training_accuracy = correct/total
 
         model.eval()
         correct = 0
@@ -176,7 +226,7 @@ if __name__ == "__main__":
         validation_accuracy = correct/total
 
         '''
-        if validation_accuracy < last_validation_accuracy and trainning_accuracy > last_train_accuracy or epoch + 1 >= args.epochs:
+        if validation_accuracy < last_validation_accuracy and training_accuracy > last_train_accuracy or epoch + 1 >= args.epochs:
             stopping_condition = True
             if epoch + 1 >= args.epochs:
                 print(f"Reached maximum number of epochs ({args.epochs})")
@@ -185,15 +235,21 @@ if __name__ == "__main__":
             print("Best validation accuracy is:", last_validation_accuracy)
         else:
             last_validation_accuracy = validation_accuracy
-            last_train_accuracy = trainning_accuracy
+            last_train_accuracy = training_accuracy
         '''
         
         epoch += 1
         
-        if epoch + 1 == args.epochs:
+        if epoch == args.epochs:
             stopping_condition = True
-            print(f"Reached maximum number of epochs ({args.epochs})")
+        
+            
 
+    print("========== Testing model on test data ==========")
+    model.eval()
+    # Reset counters here
+    correct = 0 
+    total = 0
     print("Testing started...")
     for input_words, gold_label in tqdm(test_data):
         input_words = " ".join(input_words)
