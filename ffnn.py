@@ -32,11 +32,12 @@ class FFNN(nn.Module):
 
     def forward(self, input_vector):
         # [to fill] obtain first hidden layer representation
-
+        h = self.activation(self.W1(input_vector))
         # [to fill] obtain output layer representation
-
+        z = self.W2(h)
         # [to fill] obtain probability dist.
-
+        predicted_vector = self.softmax(z)
+        
         return predicted_vector
 
 
@@ -80,21 +81,49 @@ def convert_to_vector_representation(data, word2index):
 
 
 
-def load_data(train_data, val_data):
+def load_data(train_data, val_data, test_data):
     with open(train_data) as training_f:
         training = json.load(training_f)
     with open(val_data) as valid_f:
         validation = json.load(valid_f)
+    with open(test_data) as test_f:
+        test = json.load(test_f)
 
     tra = []
     val = []
+    tes = []
     for elt in training:
         tra.append((elt["text"].split(),int(elt["stars"]-1)))
     for elt in validation:
         val.append((elt["text"].split(),int(elt["stars"]-1)))
+    for elt in test:
+        tes.append((elt["text"].split(),int(elt["stars"]-1)))
+        
+    return tra, val, tes
 
-    return tra, val
+# function to evaluate test data and write results to file
+def evaluate_test_data(model, test_data):
+    model.eval()
+    correct = 0
+    total = 0
 
+    print("========== Evaluating on Test Data ==========")
+    if not os.path.exists("results"):
+        os.makedirs("results")
+
+    with open("results/test.out", "w") as f:
+        for input_vector, gold_label in tqdm(test_data):
+            predicted_vector = model(input_vector.view(1, -1))
+            predicted_label = torch.argmax(predicted_vector, dim=1)
+
+            correct += int(predicted_label == gold_label)
+            total += 1
+
+            # f.write(f"True: {gold_label}, Predicted: {predicted_label.item()}\n")
+
+        accuracy = correct / total
+        print(f"Test Accuracy: {accuracy:.4f}")
+        f.write(f"\nFinal Test Accuracy: {accuracy:.4f}\n")
 
 if __name__ == "__main__":
     parser = ArgumentParser()
@@ -102,7 +131,7 @@ if __name__ == "__main__":
     parser.add_argument("-e", "--epochs", type=int, required = True, help = "num of epochs to train")
     parser.add_argument("--train_data", required = True, help = "path to training data")
     parser.add_argument("--val_data", required = True, help = "path to validation data")
-    parser.add_argument("--test_data", default = "to fill", help = "path to test data")
+    parser.add_argument("--test_data", required = True, help = "path to test data")
     parser.add_argument('--do_train', action='store_true')
     args = parser.parse_args()
 
@@ -112,14 +141,14 @@ if __name__ == "__main__":
 
     # load data
     print("========== Loading data ==========")
-    train_data, valid_data = load_data(args.train_data, args.val_data) # X_data is a list of pairs (document, y); y in {0,1,2,3,4}
+    train_data, valid_data, test_data = load_data(args.train_data, args.val_data, args.test_data) # X_data is a list of pairs (document, y); y in {0,1,2,3,4}
     vocab = make_vocab(train_data)
     vocab, word2index, index2word = make_indices(vocab)
 
     print("========== Vectorizing data ==========")
     train_data = convert_to_vector_representation(train_data, word2index)
     valid_data = convert_to_vector_representation(valid_data, word2index)
-    
+    test_data = convert_to_vector_representation(test_data, word2index)
 
     model = FFNN(input_dim = len(vocab), h = args.hidden_dim)
     optimizer = optim.SGD(model.parameters(),lr=0.01, momentum=0.9)
@@ -184,4 +213,5 @@ if __name__ == "__main__":
         print("Validation time for this epoch: {}".format(time.time() - start_time))
 
     # write out to results/test.out
+    evaluate_test_data(model, test_data)
     
